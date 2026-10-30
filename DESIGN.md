@@ -123,3 +123,87 @@ sequenceDiagram
 | **Truncated Nightly File** | Network drop cuts 200K CSV to 120K rows. | Reconciliation marked `BLOCKED_REQUIRES_APPROVAL`. | Safety brake aborts mass deactivations; operator reviews diff and approves or rejects run. |
 | **Transport Preference Collision** | HR event attempts to update pickup point. | HR event applied; pickup point unchanged. | HR ingestion writes exclusively to `employees`; transport table remains untouched. |
 | **Cross-Tenant Breach** | Caller supplies Tenant A token with Tenant B employeeId. | HTTP 404 / 403 Forbidden without leaking existence. | Queries enforce `WHERE tenant_id = :authenticatedTenantId`. |
+
+---
+
+## 6. Snapshot Reconciliation & Safety Brake Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor OP as Scheduled Job / Operator
+    participant API as ReconciliationController
+    participant SVC as ReconciliationService
+    participant STG as PostgreSQL (staging)
+    participant BRAKE as SafetyBrakePolicy
+    participant RUN as reconciliation_runs
+    participant IDEM as EmployeeIngestionService
+
+    OP->>API: POST /api/v1/reconciliations/upload (200K CSV stream)
+    API->>SVC: Stream CSV with OpenCSV
+    loop 1,000-Record JDBC Batches
+        SVC->>STG: INSERT INTO reconciliation_staging
+    end
+    Note over SVC,STG: Staging complete in ~6.76s for 200K rows
+
+    SVC->>STG: SQL Diff: Active DB employees vs Staging
+    STG-->>SVC: Matched: 120,000 | Missing: 80,000 (40%)
+
+    SVC->>BRAKE: Evaluate missing ratio (0.40 vs threshold 0.30)
+    BRAKE-->>SVC: Exceeds Threshold -> CIRCUIT_BREAKER_TRIGGERED
+
+    SVC->>RUN: INSERT INTO reconciliation_runs (BLOCKED_REQUIRES_APPROVAL, missing=80000, ratio=0.40)
+    SVC-->>API: Response: {status: "BLOCKED_REQUIRES_APPROVAL", missingCount: 80000, autoDeactivated: 0}
+    API-->>OP: HTTP 200 with Blocked Status
+
+    Note over OP,API: Manual Human Intervention Flow
+    OP->>API: POST /api/v1/reconciliations/{runId}/approve
+    API->>SVC: Approve Run(runId)
+    SVC->>RUN: UPDATE reconciliation_runs SET status='APPROVED_EXECUTED'
+    loop Apply Deactivations
+        SVC->>IDEM: Deactivate missing employees (generates Outbox events)
+    end
+    API-->>OP: HTTP 200 {status: "APPROVED_EXECUTED"}
+```
+
+---
+
+## 7. Outbox Architecture & Lifecycle
+
+The transactional outbox guarantees reliable event delivery to downstream consumers without requiring distributed two-phase commit (2PC).
+
+### Outbox State Machine
+```
+[PENDING] ---------> [PROCESSING] ---------> [PUBLISHED]
+   ^                      |
+   |                      v (Worker Crash / Lease Timeout)
+   +------------------ [RETRY]
+                          | (Max Retries Exceeded)
+                          v
+                       [FAILED]
+```
+
+1. **Atomic Insertion**: When an employee event or deactivation occurs, the outbox record is inserted with status `PENDING` in the same database transaction.
+2. **Leased Polling (`FOR UPDATE SKIP LOCKED`)**:
+   ```sql
+   SELECT * FROM outbox_events
+   WHERE status = 'PENDING'
+      OR (status = 'PROCESSING' AND lease_expires_at < NOW())
+   ORDER BY created_at ASC
+   LIMIT 50
+   FOR UPDATE SKIP LOCKED;
+   ```
+3. **Lease Renewal & Crash Recovery**: Workers set `status = 'PROCESSING'` and `lease_expires_at = NOW() + 30s`. If a worker dies mid-flight, another worker claims the expired lease when `lease_expires_at < NOW()`.
+4. **Consumer Deduplication**: The downstream consumer writes `(consumer_name, event_id)` into `consumed_events` within the consumer's local transaction. Replayed deliveries are skipped cleanly.
+
+---
+
+## 8. Architectural Trade-offs & Decisions
+
+| Decision Area | Chosen Approach | Alternative Considered | Trade-off Justification |
+|---|---|---|---|
+| **Event Transport** | **PostgreSQL Transactional Outbox** | External Kafka / Redpanda Cluster | **Simplicity & Zero Dual-Write Hazard**: Avoids distributed 2PC or dual-write inconsistencies between database and external broker. PostgreSQL `FOR UPDATE SKIP LOCKED` achieves thousands of events/sec natively. Kafka was deferred to keep infrastructure self-contained and operationally robust. |
+| **Field Ownership** | **Physical Schema Separation** (`employees` vs `employee_transport_profiles`) | Column-level permissions / Single Wide Table | **Defensive Architecture**: Placing transport fields in a separate table guarantees at the database schema level that HR ingestion SQL statements cannot overwrite transport attributes, even if application-level code bugs occur. |
+| **CSV Snapshot Ingestion** | **OpenCSV Streaming + JDBC Batch Staging** | Full In-Memory Processing / Reactive Streams | **Predictable Bounded Memory**: Ingesting 200,000 rows in 1,000-record chunks consumes only ~227 MB heap delta, avoiding `OutOfMemoryError` on constrained JVMs while achieving ~29,603 rows/sec. |
+| **Safety Circuit Breaker** | **Persistent Database State** (`reconciliation_runs`) | In-Memory Flag / Redis Lock | **Auditability & Survivability**: Storing run status and approval state in PostgreSQL ensures circuit breaker states survive application restarts and multi-node deployments with full regulatory audit trails. |
+| **Concurrency Control** | **Row-Level Pessimistic Locking** (`SELECT FOR UPDATE`) | Optimistic Locking (`@Version`) | **Guaranteed Monotonic Ordering**: High-frequency out-of-order updates for the same employee serialize safely on the row lock rather than throwing optimistic lock retry exceptions under concurrent load. |

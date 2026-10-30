@@ -44,6 +44,9 @@ public class UserRepository {
         if (userCount == null || userCount == 0) {
             String userSql = "INSERT INTO users (tenant_id, username, password_hash, role, active) VALUES (?, ?, ?, ?, TRUE)";
             jdbcTemplate.update(userSql, tenantId, username, passwordHash, role);
+        } else {
+            String updateSql = "UPDATE users SET password_hash = ? WHERE tenant_id = ? AND username = ?";
+            jdbcTemplate.update(updateSql, passwordHash, tenantId, username);
         }
     }
 }

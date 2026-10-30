@@ -93,8 +93,8 @@ class OutboxCrashRecoveryTest extends BaseIntegrationTest {
         assertEquals(BookingStatus.CONFIRMED, bookingsDuringCrash.get(0).bookingStatus());
 
         // Step 4: System restarts / recovered worker comes online!
-        // Reset next_attempt_at to now for immediate retry recovery
-        jdbcTemplate.execute("UPDATE outbox_events SET next_attempt_at = NOW()");
+        // Reset next_attempt_at to past for immediate retry recovery
+        jdbcTemplate.execute("UPDATE outbox_events SET next_attempt_at = NOW() - INTERVAL '1' MINUTE");
 
         AtomicBoolean recoveredDeliveryTriggered = new AtomicBoolean(false);
         EventPublisher recoveredPublisher = event -> {

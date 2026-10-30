@@ -19,6 +19,9 @@ public class JwtTokenProvider {
 
     public JwtTokenProvider(@Value("${roster.security.jwt-secret}") String secret,
                             @Value("${roster.security.jwt-expiration-ms:86400000}") long expirationMs) {
+        if (secret == null || secret.isBlank() || secret.length() < 32) {
+            throw new IllegalArgumentException("JWT secret must be configured via environment variable JWT_SECRET and be at least 32 characters long.");
+        }
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.expirationMs = expirationMs;
     }

@@ -202,8 +202,9 @@ Access Points:
 ```bash
 curl -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"tenantId":"tenant-moveinsync","username":"hr_sync","password":"secret123"}'
+  -d '{"tenantId":"tenant-moveinsync","username":"hr_sync","password":"<DEMO_PASSWORD>"}'
 ```
+*(Default development demo password is configurable via `ROSTER_DEMO_PASSWORD`, defaulting to `DemoPassword@2026!` in `.env`)*
 Response:
 ```json
 {

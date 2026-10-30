@@ -13,12 +13,16 @@ public class DatabaseInitializer implements CommandLineRunner {
     private final OfficeRepository officeRepository;
     private final PasswordEncoder passwordEncoder;
 
+    private final String demoPassword;
+
     public DatabaseInitializer(UserRepository userRepository,
                                OfficeRepository officeRepository,
-                               PasswordEncoder passwordEncoder) {
+                               PasswordEncoder passwordEncoder,
+                               @org.springframework.beans.factory.annotation.Value("${roster.security.demo-password:${ROSTER_DEMO_PASSWORD:DemoPassword@2026!}}") String demoPassword) {
         this.userRepository = userRepository;
         this.officeRepository = officeRepository;
         this.passwordEncoder = passwordEncoder;
+        this.demoPassword = demoPassword;
     }
 
     @Override
@@ -37,7 +41,7 @@ public class DatabaseInitializer implements CommandLineRunner {
     }
 
     private void seedTenant(String tenantId, String tenantName) {
-        String defaultPwHash = passwordEncoder.encode("secret123");
+        String defaultPwHash = passwordEncoder.encode(demoPassword);
         userRepository.insertTenantAndUser(tenantId, tenantName, "hr_sync", defaultPwHash, "HR_SYNC");
         userRepository.insertTenantAndUser(tenantId, tenantName, "admin", defaultPwHash, "ADMIN");
         userRepository.insertTenantAndUser(tenantId, tenantName, "operator", defaultPwHash, "OPERATOR");

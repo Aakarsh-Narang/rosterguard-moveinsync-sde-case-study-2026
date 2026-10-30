@@ -22,7 +22,22 @@ function Invoke-PostgresQuery {
         $found = Get-ChildItem -Path "C:\Program Files\PostgreSQL" -Filter "psql.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($found) { $psql = $found.FullName }
     }
-    $pw = if ($env:SPRING_DATASOURCE_PASSWORD) { $env:SPRING_DATASOURCE_PASSWORD } else { "pranav_22" }
+    $pw = if ($env:SPRING_DATASOURCE_PASSWORD) {
+        $env:SPRING_DATASOURCE_PASSWORD
+    } elseif ($env:POSTGRES_PASSWORD) {
+        $env:POSTGRES_PASSWORD
+    } else {
+        $envFile = Join-Path $PSScriptRoot "..\.env"
+        $val = ""
+        if (Test-Path $envFile) {
+            Get-Content $envFile | ForEach-Object {
+                if ($_ -match '^(?:SPRING_DATASOURCE_PASSWORD|POSTGRES_PASSWORD)=(.*)$') {
+                    $val = $matches[1].Trim()
+                }
+            }
+        }
+        if ($val) { $val } else { "postgres" }
+    }
     $user = if ($env:SPRING_DATASOURCE_USERNAME) { $env:SPRING_DATASOURCE_USERNAME } else { "postgres" }
     
     $oldEnv = $env:PGPASSWORD
@@ -127,30 +142,31 @@ try {
     # 0.2 AUTHENTICATION
     # --------------------------------------------------------------------------
     Write-Host "`n[0.2] Authenticating Roles (No sensitive tokens logged)..." -ForegroundColor Yellow
+    $demoPassword = if ($env:ROSTER_DEMO_PASSWORD) { $env:ROSTER_DEMO_PASSWORD } else { "DemoPassword@2026!" }
 
     # HR_SYNC token (tenant-moveinsync)
-    $authHrBody = @{ tenantId = "tenant-moveinsync"; username = "hr_sync"; password = "secret123" } | ConvertTo-Json
+    $authHrBody = @{ tenantId = "tenant-moveinsync"; username = "hr_sync"; password = $demoPassword } | ConvertTo-Json
     $authHr = Invoke-RestMethod -Uri "$BaseUrl/api/v1/auth/login" -Method Post -Body $authHrBody -ContentType "application/json"
     $tokenHr = $authHr.token
     $headersHr = @{ "Authorization" = "Bearer $tokenHr"; "Content-Type" = "application/json" }
     Write-Host "    [+] Authentication HR_SYNC (tenant-moveinsync): SUCCESS" -ForegroundColor Green
 
     # OPERATOR token (tenant-moveinsync)
-    $authOpBody = @{ tenantId = "tenant-moveinsync"; username = "operator"; password = "secret123" } | ConvertTo-Json
+    $authOpBody = @{ tenantId = "tenant-moveinsync"; username = "operator"; password = $demoPassword } | ConvertTo-Json
     $authOp = Invoke-RestMethod -Uri "$BaseUrl/api/v1/auth/login" -Method Post -Body $authOpBody -ContentType "application/json"
     $tokenOp = $authOp.token
     $headersOp = @{ "Authorization" = "Bearer $tokenOp"; "Content-Type" = "application/json" }
     Write-Host "    [+] Authentication OPERATOR (tenant-moveinsync): SUCCESS" -ForegroundColor Green
 
     # HR_SYNC token (tenant-acme)
-    $authAcmeBody = @{ tenantId = "tenant-acme"; username = "hr_sync"; password = "secret123" } | ConvertTo-Json
+    $authAcmeBody = @{ tenantId = "tenant-acme"; username = "hr_sync"; password = $demoPassword } | ConvertTo-Json
     $authAcme = Invoke-RestMethod -Uri "$BaseUrl/api/v1/auth/login" -Method Post -Body $authAcmeBody -ContentType "application/json"
     $tokenAcme = $authAcme.token
     $headersAcme = @{ "Authorization" = "Bearer $tokenAcme"; "Content-Type" = "application/json" }
     Write-Host "    [+] Authentication HR_SYNC (tenant-acme): SUCCESS" -ForegroundColor Green
 
     # OPERATOR token (tenant-acme)
-    $authAcmeOpBody = @{ tenantId = "tenant-acme"; username = "operator"; password = "secret123" } | ConvertTo-Json
+    $authAcmeOpBody = @{ tenantId = "tenant-acme"; username = "operator"; password = $demoPassword } | ConvertTo-Json
     $authAcmeOp = Invoke-RestMethod -Uri "$BaseUrl/api/v1/auth/login" -Method Post -Body $authAcmeOpBody -ContentType "application/json"
     $tokenAcmeOp = $authAcmeOp.token
     $headersAcmeOp = @{ "Authorization" = "Bearer $tokenAcmeOp"; "Content-Type" = "application/json" }

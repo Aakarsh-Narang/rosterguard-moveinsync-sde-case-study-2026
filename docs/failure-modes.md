@@ -13,6 +13,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
   - Version 6 is rejected with outcome `STALE`.
   - An audit receipt is recorded in `idempotency_receipts`.
   - Employee remains in Version 7 in Hyderabad.
+- **Automated Test Proving Recovery**: `IdempotencyAndOrderingIntegrationTest.outOfOrderEvents_rejectsStaleVersion`, `ConcurrentEventIngestionTest.concurrentOutOfOrderRequests_neverRegressVersion`.
 
 ---
 
@@ -22,6 +23,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
 - **RosterGuard Mitigation**:
   - Idempotency key `(tenant_id, source_system, employee_id, source_version)` backed by a unique PostgreSQL constraint.
   - Canonical SHA-256 payload hash is checked. If version and hash match, returns `DUPLICATE` (HTTP 200) without writing to `employees` or creating outbox events.
+- **Automated Test Proving Recovery**: `IdempotencyAndOrderingIntegrationTest.replayedIdenticalEvent_returnsDuplicateReceipt`, `ConcurrentEventIngestionTest.concurrentIdenticalRequests_produceOneApplication`.
 
 ---
 
@@ -32,6 +34,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
   - Canonical SHA-256 hash differs from stored receipt hash for the same version.
   - System rejects the update with `VERSION_CONFLICT` (HTTP 409).
   - An operational alert is recorded in structured logs without leaking PII.
+- **Automated Test Proving Recovery**: `IdempotencyAndOrderingIntegrationTest.divergentPayloadSameVersion_returnsConflict`, `VersionManagementPolicyTest.evaluate_sameVersionDifferentPayload_returnsConflict`.
 
 ---
 
@@ -43,6 +46,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
   - Upon restart, `OutboxPollingWorker` polls pending events using `FOR UPDATE SKIP LOCKED`.
   - The pending event is claimed, dispatched, and marked `PUBLISHED`.
   - Downstream side effects are executed reliably with at-least-once delivery.
+- **Automated Test Proving Recovery**: `OutboxCrashRecoveryTest.crashBetweenDatabaseWriteAndPublish_recoversPendingEvents`.
 
 ---
 
@@ -59,6 +63,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
     4. Metric `safety_brake_triggered_total` is incremented.
     5. Discrepancy is logged and presented via `GET /api/v1/reconciliations/{runId}`.
     6. Only an authenticated `OPERATOR` can review and execute deactivations via `POST /api/v1/reconciliations/{runId}/approve`.
+- **Automated Test Proving Recovery**: `ReconciliationSafetyBrakeIntegrationTest.missingRatioExceedsThreshold_blocksRunUntilApproved`, Live Demo E.
 
 ---
 
@@ -68,6 +73,7 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
 - **RosterGuard Mitigation**:
   - `DeactivationConsumer` maintains a dedicated `consumed_events` table with primary key `(consumer_name, event_id)`.
   - If the event was previously processed, the consumer returns immediately without re-executing database mutations.
+- **Automated Test Proving Recovery**: `DeactivationSideEffectsIntegrationTest.deactivationEvent_cancelsFutureBookingsAndPreservesPast`, Live Demo F & G.
 
 ---
 
@@ -78,3 +84,4 @@ This document catalogs critical failure modes in the MoveInSync HR Synchronizati
   - Tenant ID is extracted strictly from the cryptographically verified JWT token (`TenantContext`), never from client-controlled request parameters.
   - All database queries enforce `WHERE tenant_id = :authenticatedTenantId`.
   - Cross-tenant queries return HTTP 404 / 403 without revealing whether the record exists in another tenant.
+- **Automated Test Proving Recovery**: `TenantIsolationIntegrationTest.tenantA_cannotAccessTenantBEmployees`.
