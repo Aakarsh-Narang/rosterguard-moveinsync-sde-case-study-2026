@@ -36,3 +36,5 @@ logs/
 *.tmp
 *.bak
 *.pdf
+*.mp4
+artifacts/
