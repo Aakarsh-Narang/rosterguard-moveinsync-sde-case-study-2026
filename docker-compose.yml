@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rosterguard-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-rosterguard}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rosterguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - rosterguard-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rosterguard-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-rosterguard}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      ROSTER_RECONCILIATION_MISSING_THRESHOLD: ${ROSTER_RECONCILIATION_MISSING_THRESHOLD:-0.30}
+      JWT_SECRET: ${JWT_SECRET:-404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - rosterguard-net
+
+volumes:
+  postgres-data:
+    name: rosterguard-postgres-data
+
+networks:
+  rosterguard-net:
+    name: rosterguard-network
