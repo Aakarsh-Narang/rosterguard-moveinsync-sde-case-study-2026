@@ -40,4 +40,12 @@ public class ReferenceDataCache {
     public void invalidateAll() {
         officeValidationCache.invalidateAll();
     }
+
+    public com.github.benmanes.caffeine.cache.stats.CacheStats getStats() {
+        return officeValidationCache.stats();
+    }
+
+    public long estimatedSize() {
+        return officeValidationCache.estimatedSize();
+    }
 }

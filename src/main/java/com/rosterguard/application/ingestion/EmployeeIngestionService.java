@@ -51,18 +51,23 @@ public class EmployeeIngestionService {
     }
 
     public HrEventRecordOutcome processSingleEvent(String tenantId, HrEventRequest request) {
-        rosterMetrics.incrementReceived();
+        io.micrometer.core.instrument.Timer.Sample sample = io.micrometer.core.instrument.Timer.start(rosterMetrics.getRegistry());
+        try {
+            rosterMetrics.incrementReceived();
 
-        // 1. Boundary Validation
-        Optional<String> validationError = validationService.validate(tenantId, request);
-        if (validationError.isPresent()) {
-            rosterMetrics.incrementRejected();
-            return new HrEventRecordOutcome(request.getEventId(), request.getEmployeeId(),
-                    request.getSourceVersion(), ProcessingOutcome.REJECTED, validationError.get());
+            // 1. Boundary Validation
+            Optional<String> validationError = validationService.validate(tenantId, request);
+            if (validationError.isPresent()) {
+                rosterMetrics.incrementRejected();
+                return new HrEventRecordOutcome(request.getEventId(), request.getEmployeeId(),
+                        request.getSourceVersion(), ProcessingOutcome.REJECTED, validationError.get());
+            }
+
+            // 2. Transactional ingestion
+            return executeTransactionalIngest(tenantId, request);
+        } finally {
+            sample.stop(rosterMetrics.getEventProcessingTimer());
         }
-
-        // 2. Transactional ingestion
-        return executeTransactionalIngest(tenantId, request);
     }
 
     public HrBatchEventResponse processBatch(String tenantId, List<HrEventRequest> requests) {

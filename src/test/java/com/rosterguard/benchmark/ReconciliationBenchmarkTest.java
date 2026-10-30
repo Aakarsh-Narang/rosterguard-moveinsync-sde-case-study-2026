@@ -26,6 +26,11 @@ class ReconciliationBenchmarkTest extends BaseIntegrationTest {
 
     private static final String TENANT_ID = "tenant-moveinsync";
 
+    @org.junit.jupiter.api.BeforeEach
+    void setup() {
+        cleanDatabase();
+    }
+
     @Test
     @DisplayName("Performance Benchmark: Streaming 200,000 CSV records with bounded memory and measuring throughput")
     void benchmark200kEmployeesReconciliation() throws Exception {

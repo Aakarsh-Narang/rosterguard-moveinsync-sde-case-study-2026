@@ -37,6 +37,7 @@ public class DeactivationConsumer {
 
         // 1. Idempotency check via consumed_events deduplication table
         if (consumedEventsRepository.isConsumed(CONSUMER_NAME, event.getEventId())) {
+            rosterMetrics.incrementConsumerDuplicate();
             log.info("Event {} already processed by {}, skipping duplicate execution",
                     event.getEventId(), CONSUMER_NAME);
             return;
@@ -50,7 +51,8 @@ public class DeactivationConsumer {
         int cancelledCount = cabBookingRepository.cancelFutureBookingsAndFreeSeats(tenantId, employeeId, now);
         if (cancelledCount > 0) {
             rosterMetrics.incrementBookingsCancelled(cancelledCount);
-            log.info("Cancelled {} future cab bookings for employee {}", cancelledCount, employeeId);
+            rosterMetrics.incrementSeatReleases(cancelledCount);
+            log.info("Cancelled {} future cab bookings and released seats for employee {}", cancelledCount, employeeId);
         }
 
         // 3. Record event consumption atomically

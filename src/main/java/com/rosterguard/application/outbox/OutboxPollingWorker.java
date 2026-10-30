@@ -49,10 +49,12 @@ public class OutboxPollingWorker {
 
         int processed = 0;
         for (OutboxEvent event : claimedEvents) {
+            io.micrometer.core.instrument.Timer.Sample sample = io.micrometer.core.instrument.Timer.start(rosterMetrics.getRegistry());
             try {
                 // Publish without holding long database lock
                 eventPublisher.publish(event);
                 outboxRepository.markPublished(event.getEventId());
+                sample.stop(rosterMetrics.getOutboxPublishTimer());
                 processed++;
             } catch (Exception e) {
                 rosterMetrics.incrementOutboxRetry();

@@ -17,6 +17,7 @@ public class ReconciliationRunResponse {
     private Instant startedAt;
     private Instant completedAt;
     private String message;
+    private java.util.List<ReconciliationRowError> sampleErrors = new java.util.ArrayList<>();
 
     public ReconciliationRunResponse() {}
 
@@ -78,4 +79,7 @@ public class ReconciliationRunResponse {
 
     public String getMessage() { return message; }
     public void setMessage(String message) { this.message = message; }
+
+    public java.util.List<ReconciliationRowError> getSampleErrors() { return sampleErrors; }
+    public void setSampleErrors(java.util.List<ReconciliationRowError> sampleErrors) { this.sampleErrors = sampleErrors; }
 }

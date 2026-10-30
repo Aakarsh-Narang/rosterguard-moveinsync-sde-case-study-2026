@@ -96,4 +96,14 @@ public class OutboxRepository {
         Integer count = jdbcTemplate.queryForObject(sql, Integer.class);
         return count != null ? count : 0;
     }
+
+    public double getOldestPendingAgeSeconds() {
+        String sql = "SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_at))) FROM outbox_events WHERE status = 'PENDING'";
+        try {
+            Double age = jdbcTemplate.queryForObject(sql, Double.class);
+            return age != null && age > 0 ? age : 0.0;
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
 }
