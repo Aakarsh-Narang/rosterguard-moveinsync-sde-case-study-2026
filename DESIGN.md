@@ -1,209 +1,114 @@
-# RosterGuard — System Design & Architecture Specification
-
-## 1. System Overview
-**RosterGuard** is an idempotent, out-of-order, self-healing HR synchronization engine designed to bridge corporate HR systems and the MoveInSync employee transport fleet.
-
-### Key Architectural Pillars
-- **Strict Idempotency & Per-Employee Monotonic Ordering**: Guaranteed via composite keys and canonical SHA-256 payload hashing.
-- **Physical Field Ownership**: Schema-level separation prevents HR updates from corrupting transport preferences.
-- **Transactional Outbox with Lease Recovery**: Single-transaction database changes + durable outbox events with `FOR UPDATE SKIP LOCKED`.
-- **Streaming Nightly Reconciliation with Safety Brake**: Bounded-memory CSV diff of 200,000 employees with configurable circuit breaker preventing catastrophic mass deactivations.
-- **Tenant Isolation & RBAC**: Tenant context enforced from JWT authentication token.
+# RosterGuard — System Design Note
+**Author:** Aakarsh-Narang | **Role:** Senior Backend Engineer | **Target:** MoveInSync SDE Assessment 2026
 
 ---
 
-## 2. Architecture Diagram
+## 1. Architecture Overview & Core Boundaries
+
+RosterGuard is an idempotent, out-of-order, self-healing HR synchronization engine connecting enterprise HRIS systems (e.g., Workday) with the MoveInSync corporate transport fleet.
 
 ```mermaid
-graph TD
-    HR[HR External System / Workday] -->|HTTPS REST| GW[RosterGuard API Gateway]
-    CSV[Nightly CSV Snapshot 200K Rows] -->|Streaming Upload| GW
-
-    subgraph Security_Context[Security & Tenant Context]
-        GW -->|Verify JWT Principal| TC[TenantContext]
+graph LR
+    HR[HR Webhook / API] -->|HTTPS REST| API[RosterGuard API Gateway]
+    CSV[Nightly 200K CSV] -->|Streaming Upload| API
+    API -->|JWT TenantContext| SEC[Security Boundary]
+    SEC -->|Validate & Hash| VAL[Validation & Hash Engine]
+    VAL -->|ACID Transaction| DB[(PostgreSQL)]
+    
+    subgraph Data Layer
+        DB --> EMP[employees: HR Owned]
+        DB --> TRP[employee_transport_profiles: Fleet Owned]
+        DB --> OUT[outbox_events: Tx Outbox]
     end
-
-    subgraph Core_Engine[RosterGuard Core Engine]
-        TC -->|Validate Boundary| VAL[EventValidationService]
-        VAL -->|Check Idempotency & Order| IDEM[Idempotency & Ordering Engine]
-        
-        IDEM -->|1. Update HR Fields| DB_EMP[(PostgreSQL: employees)]
-        IDEM -->|2. Record Receipt| DB_IDEM[(PostgreSQL: idempotency_receipts)]
-        IDEM -->|3. Insert Outbox Event| DB_OUT[(PostgreSQL: outbox_events)]
-    end
-
-    subgraph Ownership_Isolation[Field Ownership]
-        ADMIN[Transport Admin] -->|Update Pickup/Assistance| DB_PROF[(PostgreSQL: employee_transport_profiles)]
-        DB_EMP -.->|FK employee_id| DB_PROF
-    end
-
-    subgraph Reconciliation_Engine[Streaming Reconciliation]
-        CSV -->|OpenCSV / Jackson Stream 1K Batches| STG[(PostgreSQL: reconciliation_staging)]
-        STG -->|DB-Side SQL Diff & Hash Compare| DIFF[Diff & Hash Matcher]
-        DIFF -->|Missing Ratio >= 30%| BRAKE[Safety Brake Circuit Breaker]
-        BRAKE -->|Hold & Alert| OP[Human Operator Approval]
-        BRAKE -->|Within Threshold| IDEM
-    end
-
-    subgraph Async_Event_Bus[Transactional Outbox Poller]
-        DB_OUT -->|FOR UPDATE SKIP LOCKED| POL[OutboxPollingWorker]
-        POL -->|At-Least-Once Dispatch| PUB[EventPublisher]
-        PUB -->|Consume Event| DEACT[DeactivationConsumer]
-        DEACT -->|Cancel Future Bookings & Free Seats| BOOK[(PostgreSQL: cab_bookings)]
-        DEACT -->|Deduplicate Event ID| DEDUP[(PostgreSQL: consumed_events)]
-    end
+    
+    OUT -->|SKIP LOCKED Poller| POL[Outbox Worker]
+    POL -->|At-Least-Once| CONS[Deactivation Consumer]
+    CONS -->|Cancel Bookings & Free Seats| FLT[Fleet DB]
 ```
+
+### Transaction Boundaries
+- **Single Event Ingestion**: A single PostgreSQL transaction updates `employees` (or records an audit trail in `idempotency_receipts`) and atomically inserts a `PENDING` event into `outbox_events`.
+- **Nightly Reconciliation**: Streaming CSV chunks ($B = 1,000$) are staged in unlogged temporary staging tables ($O(B)$ memory). Diffing is performed database-side via SQL set operations ($O(N \log N)$ index scans). Approved deactivations are committed in bounded batches to prevent long-running lock contention.
+- **Outbox Worker**: Poller processes batches with `SELECT ... FOR UPDATE SKIP LOCKED` and leases each message for 30 seconds, updating status to `PUBLISHED` upon consumer acknowledgment.
 
 ---
 
-## 3. Event Processing Sequence Diagram
+## 2. Hardest Flow: Concurrent Out-of-Order Ingestion with Failure
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor HR as HR System
-    participant API as HrEventController
-    participant VAL as EventValidationService
-    participant SVC as EmployeeIngestionService
-    participant IDEM as IdempotencyService
-    participant DB as PostgreSQL (ACID Tx)
-    participant WORKER as OutboxPollingWorker
-    participant CONS as DeactivationConsumer
+    participant API as Ingestion API
+    participant DB as PostgreSQL (Tx)
+    participant OUT as outbox_events
+    participant POL as Outbox Poller
+    participant CONS as Deactivation Consumer
 
-    HR->>API: POST /api/v1/hr/events (v7 Transfer)
-    API->>VAL: Validate fields (email, phone, office)
-    VAL-->>API: Validated (No PII leak)
-    API->>SVC: Ingest Event (v7)
-    SVC->>DB: BEGIN TRANSACTION
-    SVC->>IDEM: Check Idempotency Key (tenant+source+emp+v7)
-    
-    alt Version > Stored Version
-        IDEM->>DB: UPDATE employees (name, office, v7, hash)
-        IDEM->>DB: INSERT idempotency_receipts (v7, APPLIED)
-        IDEM->>DB: INSERT outbox_events (EmployeeTransferred, PENDING)
-        DB-->>SVC: Commit Successful
-        SVC-->>API: Result: APPLIED
-    else Version < Stored Version
-        IDEM->>DB: INSERT idempotency_receipts (v6, STALE)
-        DB-->>SVC: Commit Audit Record
-        SVC-->>API: Result: STALE (No-op)
-    else Version == Stored Version & Same Hash
-        SVC-->>API: Result: DUPLICATE (No-op)
-    else Version == Stored Version & Different Hash
-        SVC-->>API: Result: VERSION_CONFLICT (Rejected)
-    end
+    Note over HR,API: Out-of-order delivery: v7 arrives, then delayed v6 arrives
+    HR->>API: POST /api/v1/hr/events (v7: Transfer BLR->HYD)
+    API->>DB: BEGIN Tx; SELECT FOR UPDATE emp; Check version & hash
+    DB-->>API: Stored version=5. v7 > 5 -> VALID
+    API->>DB: UPDATE employees SET office='HYD', version=7; INSERT outbox_events(v7, PENDING)
+    API->>DB: COMMIT Tx
+    API-->>HR: HTTP 200 {status: APPLIED, version: 7}
 
-    API-->>HR: HTTP 200 {status: APPLIED/STALE/DUPLICATE}
+    HR->>API: POST /api/v1/hr/events (v6: Stale Update)
+    API->>DB: BEGIN Tx; SELECT FOR UPDATE emp; Check version
+    DB-->>API: Stored version=7. v6 <= 7 -> STALE
+    API->>DB: INSERT idempotency_receipts(v6, STALE); COMMIT Tx
+    API-->>HR: HTTP 200 {status: STALE, version: 7} (No-op; HYD preserved)
 
-    Note over WORKER,DB: Asynchronous Outbox Polling
-    WORKER->>DB: SELECT * FROM outbox_events WHERE status='PENDING' FOR UPDATE SKIP LOCKED
-    WORKER->>CONS: Dispatch Event (EmployeeDeactivated / Transferred)
-    CONS->>DB: Cancel future cab_bookings (pickup_time > NOW)
-    CONS->>DB: Record consumed_events(event_id)
-    WORKER->>DB: UPDATE outbox_events SET status='PUBLISHED', published_at=NOW()
+    Note over POL,CONS: Transactional Outbox Dispatch & Consumer Deduplication
+    POL->>DB: SELECT * FROM outbox_events WHERE status='PENDING' FOR UPDATE SKIP LOCKED
+    POL->>CONS: Dispatch EmployeeTransferred(empId, HYD, v7)
+    CONS->>DB: Idempotent seat update & booking sync; record consumed_events(eventId)
+    POL->>DB: UPDATE outbox_events SET status='PUBLISHED'
 ```
 
 ---
 
-## 4. Database Consistency Decisions
-1. **Isolation Level**: Read Committed with explicit pessimistic row locks (`SELECT ... FOR UPDATE`) during concurrent employee mutations to guarantee zero lost updates or version rollbacks.
-2. **Single Transaction Boundary**: Employee update, idempotency receipt, and outbox event are committed atomically in one database transaction.
-3. **Pessimistic Skip-Locked Work Queues**: Outbox worker polls using `FOR UPDATE SKIP LOCKED`, preventing database worker contention and deadlock states.
+## 3. Core Engineering Guarantees
+
+### Idempotency & Monotonic Ordering Strategy
+- **Natural Composite Key**: `(tenant_id, source_system, employee_id, source_version)`.
+- **Canonical SHA-256 Hashing**: Incoming payload fields (`name`, `email`, `phone`, `office`, `active`) are normalized and hashed. Identical payload replays return `DUPLICATE` (no-op). If payload hash diverges on an identical version, the engine rejects with `VERSION_CONFLICT` (HTTP 409).
+- **Strict Monotonic Ordering**: An update is applied iff `incoming_version > stored_version`. Out-of-order events are recorded as `STALE` without mutating current state.
+
+### Schema Field Ownership
+- **Physical Table Separation**: HR owns `employees` (`name`, `email`, `phone`, `office_code`, `source_version`, `active`). Transport operations own `employee_transport_profiles` (`pickup_landmark`, `special_assistance`, `seat_preference`, `shift_timing`).
+- **Guarantee**: HR sync SQL statements target solely `employees`, mathematically preventing HR sync from clearing employee transport preferences.
+
+### Reconciliation Safety-Brake Strategy
+- **Circuit Breaker Threshold**: If missing active employees in the nightly snapshot $\ge 30\%$ (configurable via `roster.reconciliation.missing-threshold`), automatic deactivations are aborted.
+- **Self-Healing & Audit**: Status set to `BLOCKED_REQUIRES_APPROVAL`. Zero employees are deactivated. An operator must review discrepancies and explicitly approve via `/api/v1/reconciliation/{runId}/approve`. Older snapshots cannot overwrite newer real-time versions.
 
 ---
 
-## 5. Failure Modes & Recovery Matrix
+## 4. Failure Modes & Self-Healing Matrix
 
-| Failure Mode | Root Cause / Trigger | User / Caller Experience | System Self-Healing & Recovery |
-|---|---|---|---|
-| **Out-of-Order Delivery** | Network jitter; v7 arrives before v6. | Caller receives `STALE` for v6. v7 state remains active. | Version comparison rejects v6; audit receipt stored in `idempotency_receipts`. |
-| **Duplicate Events** | Source retry after timeout. | Caller receives `DUPLICATE` (HTTP 200). | Zero write to `employees`, idempotency key returns cached receipt. |
-| **Version Payload Conflict** | Source bug sends two different payloads for same version. | Caller receives `VERSION_CONFLICT` (HTTP 409). | Transaction rolled back; recorded in security/audit log. |
-| **Crash Before Outbox Dispatch** | JVM kills worker between DB commit and publication. | HR caller already received success (HTTP 200). | Next polling worker lease claims pending outbox row and publishes it. At-least-once guarantee. |
-| **Truncated Nightly File** | Network drop cuts 200K CSV to 120K rows. | Reconciliation marked `BLOCKED_REQUIRES_APPROVAL`. | Safety brake aborts mass deactivations; operator reviews diff and approves or rejects run. |
-| **Transport Preference Collision** | HR event attempts to update pickup point. | HR event applied; pickup point unchanged. | HR ingestion writes exclusively to `employees`; transport table remains untouched. |
-| **Cross-Tenant Breach** | Caller supplies Tenant A token with Tenant B employeeId. | HTTP 404 / 403 Forbidden without leaking existence. | Queries enforce `WHERE tenant_id = :authenticatedTenantId`. |
-
----
-
-## 6. Snapshot Reconciliation & Safety Brake Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor OP as Scheduled Job / Operator
-    participant API as ReconciliationController
-    participant SVC as ReconciliationService
-    participant STG as PostgreSQL (staging)
-    participant BRAKE as SafetyBrakePolicy
-    participant RUN as reconciliation_runs
-    participant IDEM as EmployeeIngestionService
-
-    OP->>API: POST /api/v1/reconciliations/upload (200K CSV stream)
-    API->>SVC: Stream CSV with OpenCSV
-    loop 1,000-Record JDBC Batches
-        SVC->>STG: INSERT INTO reconciliation_staging
-    end
-    Note over SVC,STG: Staging complete in ~6.76s for 200K rows
-
-    SVC->>STG: SQL Diff: Active DB employees vs Staging
-    STG-->>SVC: Matched: 120,000 | Missing: 80,000 (40%)
-
-    SVC->>BRAKE: Evaluate missing ratio (0.40 vs threshold 0.30)
-    BRAKE-->>SVC: Exceeds Threshold -> CIRCUIT_BREAKER_TRIGGERED
-
-    SVC->>RUN: INSERT INTO reconciliation_runs (BLOCKED_REQUIRES_APPROVAL, missing=80000, ratio=0.40)
-    SVC-->>API: Response: {status: "BLOCKED_REQUIRES_APPROVAL", missingCount: 80000, autoDeactivated: 0}
-    API-->>OP: HTTP 200 with Blocked Status
-
-    Note over OP,API: Manual Human Intervention Flow
-    OP->>API: POST /api/v1/reconciliations/{runId}/approve
-    API->>SVC: Approve Run(runId)
-    SVC->>RUN: UPDATE reconciliation_runs SET status='APPROVED_EXECUTED'
-    loop Apply Deactivations
-        SVC->>IDEM: Deactivate missing employees (generates Outbox events)
-    end
-    API-->>OP: HTTP 200 {status: "APPROVED_EXECUTED"}
-```
+| Failure Scenario | Root Cause | System Response & Self-Healing |
+| :--- | :--- | :--- |
+| **Out-of-Order Webhook** | Network jitter; v7 arrives before v6. | v7 commits. v6 rejected as `STALE`; recorded in `idempotency_receipts`. Current state remains v7. |
+| **Payload Version Conflict** | Upstream bug issues two different payloads for v3. | Engine detects SHA-256 hash mismatch on same version, halts transaction, returns HTTP 409 `VERSION_CONFLICT`. |
+| **Worker Crash During Outbox** | JVM crashes mid-publication. | Outbox row lease expires (`lease_expires_at < NOW()`). Another worker claims row via `FOR UPDATE SKIP LOCKED`. |
+| **Consumer Duplicate Delivery** | Worker retries dispatch after network blip. | Downstream consumer records `(consumer_name, event_id)` in `consumed_events`; skips duplicate. |
+| **Corrupted / Truncated CSV** | Network disconnect drops 200K CSV to 100K rows. | Missing ratio = 50% $\ge 30\%$. Safety brake trips; 0 employees deactivated; requires human approval. |
+| **Cross-Tenant Breach** | Tenant A supplies valid token but queries Tenant B. | Parameterized queries filter `WHERE tenant_id = :tenantId`. Returns 404 (does not leak record existence). |
 
 ---
 
-## 7. Outbox Architecture & Lifecycle
+## 5. Architectural Trade-offs & Complexity
 
-The transactional outbox guarantees reliable event delivery to downstream consumers without requiring distributed two-phase commit (2PC).
+| Design Area | Chosen Architecture | Alternative Considered | Technical Trade-off |
+| :--- | :--- | :--- | :--- |
+| **Event Transport** | **PostgreSQL Transactional Outbox** | External Kafka Broker | **Eliminates Dual-Write Risk**: Transactional outbox guarantees atomicity between business state and event queue without distributed 2PC. External Kafka broker intentionally deferred to keep deployment lightweight and self-contained. |
+| **CSV Memory Profile** | **OpenCSV Stream + JDBC Batching** | Full CSV In-Memory List | **$O(B)$ Memory Footprint**: Ingests 200,000 rows in 1,000-row chunks ($B=1000$), keeping JVM heap delta strictly bounded at **226 MB** without risking `OutOfMemoryError`. |
+| **Diff Engine** | **Database-Side SQL Join** | Application HashMap Diff | **Scalability & Offload**: Database temp table hash index diff executes in **7.12 seconds** (**28,082 rows/sec**), offloading CPU load from JVM. |
+| **Concurrency Lock** | **Pessimistic Row Lock (`FOR UPDATE`)** | Optimistic Locking (`@Version`) | **Determinism**: High-concurrency employee events queue linearly on the database row lock rather than failing under optimistic lock retry storms. |
 
-### Outbox State Machine
-```
-[PENDING] ---------> [PROCESSING] ---------> [PUBLISHED]
-   ^                      |
-   |                      v (Worker Crash / Lease Timeout)
-   +------------------ [RETRY]
-                          | (Max Retries Exceeded)
-                          v
-                       [FAILED]
-```
-
-1. **Atomic Insertion**: When an employee event or deactivation occurs, the outbox record is inserted with status `PENDING` in the same database transaction.
-2. **Leased Polling (`FOR UPDATE SKIP LOCKED`)**:
-   ```sql
-   SELECT * FROM outbox_events
-   WHERE status = 'PENDING'
-      OR (status = 'PROCESSING' AND lease_expires_at < NOW())
-   ORDER BY created_at ASC
-   LIMIT 50
-   FOR UPDATE SKIP LOCKED;
-   ```
-3. **Lease Renewal & Crash Recovery**: Workers set `status = 'PROCESSING'` and `lease_expires_at = NOW() + 30s`. If a worker dies mid-flight, another worker claims the expired lease when `lease_expires_at < NOW()`.
-4. **Consumer Deduplication**: The downstream consumer writes `(consumer_name, event_id)` into `consumed_events` within the consumer's local transaction. Replayed deliveries are skipped cleanly.
-
----
-
-## 8. Architectural Trade-offs & Decisions
-
-| Decision Area | Chosen Approach | Alternative Considered | Trade-off Justification |
-|---|---|---|---|
-| **Event Transport** | **PostgreSQL Transactional Outbox** | External Kafka / Redpanda Cluster | **Simplicity & Zero Dual-Write Hazard**: Avoids distributed 2PC or dual-write inconsistencies between database and external broker. PostgreSQL `FOR UPDATE SKIP LOCKED` achieves thousands of events/sec natively. Kafka was deferred to keep infrastructure self-contained and operationally robust. |
-| **Field Ownership** | **Physical Schema Separation** (`employees` vs `employee_transport_profiles`) | Column-level permissions / Single Wide Table | **Defensive Architecture**: Placing transport fields in a separate table guarantees at the database schema level that HR ingestion SQL statements cannot overwrite transport attributes, even if application-level code bugs occur. |
-| **CSV Snapshot Ingestion** | **OpenCSV Streaming + JDBC Batch Staging** | Full In-Memory Processing / Reactive Streams | **Predictable Bounded Memory**: Ingesting 200,000 rows in 1,000-record chunks consumes only ~227 MB heap delta, avoiding `OutOfMemoryError` on constrained JVMs while achieving ~29,603 rows/sec. |
-| **Safety Circuit Breaker** | **Persistent Database State** (`reconciliation_runs`) | In-Memory Flag / Redis Lock | **Auditability & Survivability**: Storing run status and approval state in PostgreSQL ensures circuit breaker states survive application restarts and multi-node deployments with full regulatory audit trails. |
-| **Concurrency Control** | **Row-Level Pessimistic Locking** (`SELECT FOR UPDATE`) | Optimistic Locking (`@Version`) | **Guaranteed Monotonic Ordering**: High-frequency out-of-order updates for the same employee serialize safely on the row lock rather than throwing optimistic lock retry exceptions under concurrent load. |
+### Algorithmic Complexity & Scaling Limits
+- **Single Event Processing**: $O(1)$ time, $O(1)$ memory.
+- **Batch Event Ingestion**: $O(K)$ time for batch size $K$, $O(K)$ memory.
+- **Nightly Reconciliation**: $O(N)$ streaming time with $O(B)$ memory ($B=1,000$). SQL diff complexity is $O(N \log N)$ where $N=200,000$.
+- **Scaling Bottlenecks**: Single PostgreSQL write-master IOPS on `employees` table under extreme horizontal ingest; mitigated in production by tenant-based database partitioning or sharding.

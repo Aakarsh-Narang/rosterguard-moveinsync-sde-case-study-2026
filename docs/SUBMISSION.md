@@ -124,15 +124,15 @@ The project includes an automated end-to-end demonstration script verifying all 
 
 ## 5. Test Evidence
 
-The test suite consists of 23 automated tests covering unit, integration, concurrency, failure-injection, and performance benchmarks:
+The test suite consists of 24 automated tests covering unit, integration, concurrency, failure-injection, and performance benchmarks:
 
 ```
 [INFO] Results:
-[INFO] Tests run: 23, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 24, Failures: 0, Errors: 0, Skipped: 0
 [INFO] ------------------------------------------------------------------------
 [INFO] BUILD SUCCESS
 [INFO] ------------------------------------------------------------------------
-[INFO] Total time:  22.043 s
+[INFO] Total time:  24.761 s
 ```
 
 ### Test Breakdown
@@ -140,32 +140,44 @@ The test suite consists of 23 automated tests covering unit, integration, concur
   - `CanonicalHasherTest`: Deterministic SHA-256 payload calculation and transport field exclusion (3 tests).
   - `EventValidationServiceTest`: Email RFC-5322, phone E.164, office codes, and partial batch success (5 tests).
   - `VersionManagementPolicyTest`: Monotonic ordering, stale rejection, version conflicts (5 tests).
-- **Integration Tests (5/5 PASS)**:
-  - `IdempotencyAndOrderingIntegrationTest`: Duplicate detection and out-of-order execution against database.
-  - `FieldOwnershipIntegrationTest`: HR updates preserving transport-owned pickup points.
-  - `DeactivationSideEffectsIntegrationTest`: Future booking cancellation, seat release, past booking preservation.
-  - `ReconciliationSafetyBrakeIntegrationTest`: Circuit breaker threshold triggering and operator approval.
-  - `TenantIsolationIntegrationTest`: Cross-tenant data isolation and JWT context enforcement.
+- **Integration Tests (6/6 PASS)**:
+  - `IdempotencyAndOrderingIntegrationTest`: Duplicate detection and out-of-order execution against database (2 tests).
+  - `FieldOwnershipIntegrationTest`: HR updates preserving transport-owned pickup points (1 test).
+  - `DeactivationSideEffectsIntegrationTest`: Future booking cancellation, seat release, past booking preservation (1 test).
+  - `ReconciliationSafetyBrakeIntegrationTest`: Circuit breaker threshold triggering and operator approval (1 test).
+  - `TenantIsolationIntegrationTest`: Cross-tenant data isolation and JWT context enforcement (1 test).
 - **Concurrency Tests (2/2 PASS)**:
-  - `ConcurrentEventIngestionTest`: Multi-threaded contention on identical employee records.
+  - `ConcurrentEventIngestionTest`: Multi-threaded contention on identical employee records (2 tests).
 - **Failure Recovery Tests (1/1 PASS)**:
-  - `OutboxCrashRecoveryTest`: Publisher network interruption and expired lease recovery with zero data loss.
-- **Performance Benchmark (1/1 PASS)**:
-  - `ReconciliationBenchmarkTest`: Full 200,000-row streaming reconciliation.
+  - `OutboxCrashRecoveryTest`: Publisher network interruption and expired lease recovery with zero data loss (1 test).
+- **Performance Benchmarks (2/2 PASS)**:
+  - `ReconciliationBenchmarkTest`: Full 200,000-row streaming reconciliation (1 test).
+  - `HrEventLatencyBenchmarkTest`: Real-time HR event ingestion throughput and p50/p99 latency (1 test).
 
 ---
 
 ## 6. Performance & Benchmark Evidence
 
+### 6.1 HR Event Ingestion Latency Benchmark (`HrEventLatencyBenchmarkTest`)
+- **Dataset**: 500 measured synthetic events (following 50 warm-up requests)
+- **Outcome**: 500 / 500 successful (0 failures, 100% success)
+- **Throughput**: **1,048.00 events/second**
+- **Average Latency**: **0.922 ms**
+- **p50 Latency**: **0.725 ms**
+- **p95 Latency**: **2.298 ms**
+- **p99 Latency**: **3.099 ms**
+
+### 6.2 Nightly 200,000-Row Reconciliation Benchmark (`ReconciliationBenchmarkTest`)
 - **Dataset**: 200,000 synthetic employee records in a streaming CSV snapshot.
-- **Execution Time**: **6.76 seconds** (Target threshold: < 60 seconds).
-- **Throughput**: **~29,603 rows/second**.
-- **Heap Memory Delta**: **~227 MB** (Bounded heap via 1,000-row batch chunking).
-- **Host Hardware**: AMD Ryzen / Intel x86_64, Windows 11, 16 GB RAM, NVMe SSD.
-- **Database Engine**: PostgreSQL with indexed composite keys.
+- **Execution Time**: **7.12 seconds** (Target threshold: < 60 seconds; ~8.4x faster than limit).
+- **Throughput**: **28,082 rows/second**.
+- **Heap Memory Delta**: **226 MB** (Bounded heap via 1,000-row batch chunking).
+- **Host Hardware**: Windows 11 amd64, 22 CPU cores, 32 GB RAM.
+- **Database Engine**: PostgreSQL 16 with indexed composite keys.
 
 ### Complexity Characteristics
-- **Streaming Parser**: $O(N)$ runtime, $O(1)$ memory relative to file size (bounded by chunk buffer size $B=1000$).
+- **Single Event**: $O(1)$ runtime, $O(1)$ memory.
+- **Streaming Parser**: $O(N)$ runtime, $O(B)$ memory relative to file size ($B=1000$).
 - **Canonical Hash**: $O(N)$ string hashing over bounded HR identity fields.
 - **Staging & Diff**: $O(N \log N)$ database-side indexed hash/merge join. Avoids shipping entire employee dataset into application heap.
 

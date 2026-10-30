@@ -6,7 +6,7 @@
 [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.3.4-brightgreen.svg)](https://spring.io/projects/spring-boot)
 [![Flyway](https://img.shields.io/badge/Flyway-10.x-red.svg)](https://flywaydb.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue.svg)](https://www.postgresql.org/)
-[![Tests](https://img.shields.io/badge/Tests-23%2F23%20Passing-success.svg)]()
+[![Tests](https://img.shields.io/badge/Tests-24%2F24%20Passing-success.svg)]()
 
 ---
 
@@ -20,7 +20,7 @@ In real-world distributed architectures:
 4. **Nightly exports are cut short** due to network drops or upstream timeouts (e.g. 120,000 rows instead of 200,000). Blind diffing would mistakenly deactivate 80,000 active employees, stranding commuters without cab service.
 5. **Downstream deactivation side-effects** must reliably cancel future cab bookings and release seat allocations without touching historical records or executing duplicate side effects on replayed events.
 
-**RosterGuard** solves these challenges with guaranteed ACID correctness, monotonic per-employee version ordering, physical schema-level field ownership separation, an asynchronous transactional outbox with recoverable leasing, and a streaming nightly reconciliation engine protected by a configurable safety brake.
+**RosterGuard** solves these challenges with guaranteed ACID correctness, monotonic per-employee version ordering, physical schema-level field ownership separation, an asynchronous PostgreSQL transactional outbox with recoverable leasing, and a streaming nightly reconciliation engine protected by a configurable safety brake. An external Kafka broker was intentionally deferred to eliminate dual-write hazards and keep operational infrastructure self-contained.
 
 ---
 
@@ -76,7 +76,7 @@ graph TD
 - **Caffeine**: Bounded local in-memory cache (max 10,000 entries, 60s TTL) for hot reference data (office validation). Critical employee version state is never cached to prevent stale version races.
 - **OpenCSV**: Memory-bounded streaming CSV parser processing 200,000 rows in 1,000-record chunks without full heap allocation.
 - **JWT (`io.jsonwebtoken:jjwt`)**: Stateless authentication embedding tenant ID and role into the verified cryptographic principal.
-- **Micrometer & Spring Actuator**: Custom domain metrics and Prometheus telemetry.
+- **Micrometer & Spring Actuator**: Custom domain metrics and Prometheus telemetry (see [docs/monitoring.md](file:///c:/Users/acer/Desktop/HR%20Roster%20Sync%20Idempotent%20Out%20of%20Order%20Self%20Healing/docs/monitoring.md)).
 
 ---
 
@@ -114,7 +114,6 @@ Normalized Flyway migration schema (`V1__init_schema.sql`):
   SET ... 
   WHERE tenant_id = ? AND employee_id = ? AND source_version < ?
   ```
-  Even under concurrent thread execution, a database-level predicate guarantees an older version can never overwrite a newer version.
 
 ### 5.2 Field Ownership
 - Transport administration owns: `preferred_pickup_point`, `special_assistance_needs`.
@@ -155,6 +154,7 @@ When an employee is deactivated:
 
 ### 5.5 Streaming 200,000-Row Nightly Reconciliation & Safety Brake
 - **Streaming Ingestion**: OpenCSV streams rows into PostgreSQL `reconciliation_staging` in batches of 1,000 rows. No 200K collection is ever held in Java heap.
+- **Row-Level Validation**: Each record is validated for required ID, name, email regex, phone format, and active flag. Invalid records are reported in `sampleErrors` without terminating valid processing.
 - **Database-Side Diff**:
   ```sql
   SELECT COUNT(*) FROM employees e
@@ -172,15 +172,38 @@ When an employee is deactivated:
 
 ---
 
-## 6. How to Run
+## 6. How to Run & Environment Setup
+
+### 6.1 Safe Local Environment Configuration
+Copy `.env.example` to `.env` and supply environment-specific credentials:
+```bash
+cp .env.example .env
+```
+Generate strong random secrets:
+```bash
+# Generate strong 256-bit JWT secret (minimum 32 bytes base64)
+openssl rand -base64 32
+
+# Generate strong database & demo passwords
+openssl rand -hex 16
+```
+Configure `.env`:
+```properties
+POSTGRES_DB=rosterguard
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=<YOUR_STRONG_DATABASE_PASSWORD>
+JWT_SECRET=<YOUR_GENERATED_JWT_SECRET_32_BYTES_MIN>
+ROSTER_DEMO_PASSWORD=<YOUR_LOCAL_DEMO_SEED_PASSWORD>
+```
+*Note: The application enforces fail-closed validation at startup. If `JWT_SECRET` or `POSTGRES_PASSWORD` is omitted, the application or Docker Compose will refuse to start.*
 
 ### Option A: Local Run with Maven
 ```bash
-# Verify all 23 tests and benchmark
-mvn clean test
+# Verify all 24 automated tests and benchmarks
+.\mvnw.bat clean verify
 
 # Run Spring Boot application
-mvn spring-boot:run
+.\mvnw.bat spring-boot:run
 ```
 
 ### Option B: Docker Compose (One-Command Run)
@@ -202,17 +225,7 @@ Access Points:
 ```bash
 curl -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"tenantId":"tenant-moveinsync","username":"hr_sync","password":"<DEMO_PASSWORD>"}'
-```
-*(Default development demo password is configurable via `ROSTER_DEMO_PASSWORD`, defaulting to `DemoPassword@2026!` in `.env`)*
-Response:
-```json
-{
-  "token": "eyJhbGciOiJIUzI1NiJ9...",
-  "tenantId": "tenant-moveinsync",
-  "username": "hr_sync",
-  "role": "HR_SYNC"
-}
+  -d '{"tenantId":"tenant-moveinsync","username":"hr_sync","password":"<ROSTER_DEMO_PASSWORD>"}'
 ```
 
 ### 2. Ingest Real-Time Version 7 HR Event (Office Transfer)
@@ -286,7 +299,7 @@ curl -X POST http://localhost:8080/api/v1/reconciliations/{runId}/approve \
 ### Test Suite Summary
 ```
 [INFO] Results:
-[INFO] Tests run: 23, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 24, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -303,20 +316,34 @@ curl -X POST http://localhost:8080/api/v1/reconciliations/{runId}/approve \
 | `ConcurrentEventIngestionTest` | Concurrency | 2 | PASSED |
 | `OutboxCrashRecoveryTest` | Failure | 1 | PASSED |
 | `ReconciliationBenchmarkTest` | Benchmark | 1 | PASSED |
-| **Total** | | **23** | **100% PASSED** |
+| `HrEventLatencyBenchmarkTest` | Benchmark | 1 | PASSED |
+| **Total** | | **24** | **100% PASSED** |
 
 ---
 
 ## 9. Performance Benchmark Results
 
-The performance benchmark (`ReconciliationBenchmarkTest`) generated a synthetic dataset of **200,000 employee records** and executed a full streaming reconciliation against the database engine.
-
-### Machine Specifications
+### Hardware & Environment Specifications
 - **Operating System**: Windows 11 (build 10.0, amd64)
-- **Runtime Environment**: OpenJDK 64-Bit Server VM (Java 25 / Java 21 release bytecode target)
-- **Heap Configuration**: G1GC, Max Heap 4,022 MB
+- **CPU**: 22 logical processor cores
+- **Physical RAM**: 32 GB
+- **Java Runtime**: OpenJDK 64-Bit Server VM 25.0.1+8-LTS-27 (Target: Java 21 bytecode)
+- **Database Engine**: PostgreSQL 16.1
 
-### Measured Results
+### 9.1 HR Event Ingestion Latency Benchmark (`HrEventLatencyBenchmarkTest`)
+Measures service-level processing for individual HR events under active PostgreSQL ACID transactions (validation, canonical SHA-256 hashing, row locking, version evaluation, persistence, and outbox write).
+- **Warm-up Events**: 50
+- **Measured Events**: 500 unique synthetic employee events
+- **Successful Events**: 500 / 500 (0 errors, 100% success)
+- **Total Duration**: 0.477 seconds
+- **Throughput**: **1,048.00 events/second**
+- **Average Latency**: **0.922 ms**
+- **p50 Latency**: **0.725 ms**
+- **p95 Latency**: **2.298 ms**
+- **p99 Latency**: **3.099 ms**
+
+### 9.2 Nightly 200,000-Row Reconciliation Benchmark (`ReconciliationBenchmarkTest`)
+Measures end-to-end streaming CSV parsing, row validation, SHA-256 canonical hashing, JDBC batch staging, and database-side SQL diffing for 200,000 records.
 ```
 ===============================================================
 ROSTERGUARD 200,000 ROW RECONCILIATION BENCHMARK RESULTS:
@@ -324,14 +351,14 @@ Total Rows Processed: 200,000
 Valid Rows Staged:    200,000
 Invalid Rows:         0
 Status:               COMPLETED
-Execution Time:       6,179 ms (6.18 seconds)
-Throughput:           32,367.7 rows/second
-Heap Memory Delta:    236 MB
+Execution Time:       7,122 ms (7.12 seconds)
+Throughput:           28,082.0 rows/second
+Heap Memory Delta:    226 MB
 JVM Max Memory:       4,022 MB
 ===============================================================
 ```
 - **Case Study Limit**: Under 60 seconds with bounded memory.
-- **RosterGuard Actual**: **6.18 seconds** (**~10x faster than target threshold**) at **32,367 rows/sec** with bounded heap memory usage (236 MB delta).
+- **RosterGuard Actual**: **7.12 seconds** (**~8.4x faster than limit**) at **28,082 rows/sec** with bounded heap memory usage (**226 MB delta**).
 
 ---
 
@@ -340,15 +367,14 @@ JVM Max Memory:       4,022 MB
 ### Time & Space Complexity
 | Operation | Time Complexity | Space Complexity | Scaling Bottleneck & Analysis |
 |---|---|---|---|
-| **Single HR Event Ingest** | $O(1)$ | $O(1)$ | PostgreSQL row lock contention on the same employeeId during massive concurrent updates. |
-| **Batch Ingest (N events)** | $O(N)$ | $O(N)$ | Database connection pool capacity. Events are processed independently. |
+| **Single HR Event Ingest** | $O(1)$ | $O(1)$ | Row lock contention on the same employeeId during concurrent updates. |
+| **Batch Ingest (K events)** | $O(K)$ | $O(K)$ | Database connection pool capacity. Events are processed independently. |
 | **Nightly CSV Streaming** | $O(N)$ | $O(B)$ where $B=1000$ (batch size) | Network bandwidth & staging disk I/O. Heap memory is strictly bounded $O(B)$. |
 | **Database-Side SQL Diff** | $O(N \log N)$ (Indexed merge/hash join) | $O(N)$ in PostgreSQL temporary tablespace | PostgreSQL `work_mem` and indexed join execution plan. Stops scaling when temporary tablespace exceeds disk capacity. |
 
 ### Architectural Trade-offs
 1. **Consistency vs Latency**: Pessimistic row locking (`SELECT FOR UPDATE`) on employee mutations slightly increases latency under high concurrency for the same employee, but guarantees zero version rollbacks or lost updates.
-2. **Single Transaction vs Message Broker**: Storing outbox events in the same PostgreSQL transaction avoids two-phase commit (2PC) or dual-write inconsistency at the cost of modest outbox table growth.
+2. **Transactional Outbox vs External Kafka**: Storing outbox events in PostgreSQL avoids dual-write inconsistencies and 2PC. Kafka was intentionally deferred to keep operational deployment clean and self-contained.
 3. **At-Least-Once Delivery**: Outbox worker guarantees at-least-once dispatch; consumer uses `consumed_events` deduplication table to achieve idempotent exactly-once logical processing.
-4. **Known Limitations**:
-   - Assumes complete authoritative HR snapshots for each event version. Arbitrary partial field patches would require field-level vector versioning or an ordered staging buffer.
-   - Streaming reconciliation currently stages in PostgreSQL; for datasets exceeding 10,000,000 employees, staging should move to external object storage (S3/GCS) paired with distributed query engines (Presto/DuckDB).
+4. **Reference Data Cache Staleness**: Caffeine cache enforces 10,000 max entries, 60s TTL, and explicit cache invalidation upon updates. Maximum stale window is bounded to 60s; cache failure gracefully falls back to PostgreSQL. Employee version state is never cached.
+

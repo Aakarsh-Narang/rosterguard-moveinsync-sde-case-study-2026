@@ -52,11 +52,12 @@ Every submission requirement is tracked and categorized under one of the four ma
 | Test Suite / Metric | Scope / Targets | Status | Notes |
 |---|---|:---:|---|
 | **Unit Tests (13 tests)** | `CanonicalHasherTest` (3), `EventValidationServiceTest` (5), `VersionManagementPolicyTest` (5) | **PASS** | 13/13 passing in < 30ms. |
-| **Integration Tests (5 tests)** | Idempotency (2), Field Ownership (1), Deactivation (1), Safety Brake (1), Tenant Isolation (1) | **PASS** | 5/5 passing against embedded database. |
+| **Integration Tests (6 tests)** | Idempotency & Ordering (2), Field Ownership (1), Deactivation (1), Safety Brake (1), Tenant Isolation (1) | **PASS** | 6/6 passing against PostgreSQL test instance. |
 | **Concurrency Tests (2 tests)** | Multi-threaded out-of-order & identical event ingestion | **PASS** | 2/2 passing under high thread contention. |
 | **Failure Recovery Tests (1 test)** | `OutboxCrashRecoveryTest` | **PASS** | 1/1 passing simulating publisher network partition. |
-| **200,000-Row Benchmark (1 test)** | `ReconciliationBenchmarkTest` | **PASS** | 200K rows staged & diffed in **6.76s** (limit: < 60s). |
-| **Total Automated Tests** | **23 tests executed, 0 failures, 0 errors, 0 skipped** | **PASS** | `mvnw.bat clean verify` succeeds in ~36 seconds. |
+| **200,000-Row Reconciliation Benchmark (1 test)** | `ReconciliationBenchmarkTest` | **PASS** | 200K rows staged & diffed in **7.12s** (limit: < 60s) at **28,082 rows/sec** with **226 MB** heap delta. |
+| **HR Event Latency Benchmark (1 test)** | `HrEventLatencyBenchmarkTest` | **PASS** | 500 events measured at **1,048 events/sec**, p50: **0.725 ms**, p95: **2.298 ms**, p99: **3.099 ms**. |
+| **Total Automated Tests** | **24 tests executed, 0 failures, 0 errors, 0 skipped** | **PASS** | `mvnw.bat clean verify` succeeds in ~25 seconds. |
 
 ---
 

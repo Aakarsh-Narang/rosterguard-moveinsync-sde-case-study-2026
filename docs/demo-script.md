@@ -79,9 +79,10 @@ This guide provides a structured, timed 3–5 minute presentation script accompa
 ### Segment 6: Performance Benchmark & Architectural Trade-offs (4:00 – 4:45)
 - **Visual**: Highlight the benchmark metrics in `README.md` or test log.
 - **Spoken Script**:
-  > *"Regarding performance, our 200,000-row reconciliation benchmark processes, validates, stages, and diffs a full 200,000-row CSV snapshot in just **6.76 seconds**—over 8 times faster than the 60-second assessment threshold—at roughly **29,603 rows per second** with a modest 227 MB heap delta, thanks to OpenCSV streaming and JDBC batching.  
+  > *"Regarding performance, our 200,000-row reconciliation benchmark processes, validates, stages, and diffs a full 200,000-row CSV snapshot in just **7.12 seconds**—over 8 times faster than the 60-second assessment threshold—at roughly **28,082 rows per second** with a modest 226 MB heap delta, thanks to OpenCSV streaming and JDBC batching.  
+  > Furthermore, our real-time HR event ingestion benchmark achieved over **1,048 events per second** with a median latency of **0.725 milliseconds** and a 99th-percentile latency of **3.099 milliseconds**.  
   > Architecturally, we deliberately implemented a PostgreSQL transactional outbox instead of introducing an external Kafka broker. This guarantees atomic consistency with zero dual-write anomalies while keeping deployment lightweight and operationally bulletproof.  
-  > In conclusion, RosterGuard meets all 10 core requirements with 23 passing automated tests and a 100% verified live demonstration. Thank you."*
+  > In conclusion, RosterGuard meets all 10 core requirements with 24 passing automated tests and a 100% verified live demonstration. Thank you."*
 
 ---
 
