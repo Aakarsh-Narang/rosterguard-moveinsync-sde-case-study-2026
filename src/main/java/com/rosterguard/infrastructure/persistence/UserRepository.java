@@ -33,12 +33,16 @@ public class UserRepository {
         }
     }
 
-    public void insertTenantAndUser(String tenantId, String tenantName, String username, String passwordHash, String role) {
+    public void insertTenantIfNotExists(String tenantId, String tenantName) {
         Integer tenantCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM tenants WHERE id = ?", Integer.class, tenantId);
         if (tenantCount == null || tenantCount == 0) {
             String tenantSql = "INSERT INTO tenants (id, name, status, created_at) VALUES (?, ?, 'ACTIVE', CURRENT_TIMESTAMP)";
             jdbcTemplate.update(tenantSql, tenantId, tenantName);
         }
+    }
+
+    public void insertTenantAndUser(String tenantId, String tenantName, String username, String passwordHash, String role) {
+        insertTenantIfNotExists(tenantId, tenantName);
 
         Integer userCount = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM users WHERE tenant_id = ? AND username = ?", Integer.class, tenantId, username);
         if (userCount == null || userCount == 0) {

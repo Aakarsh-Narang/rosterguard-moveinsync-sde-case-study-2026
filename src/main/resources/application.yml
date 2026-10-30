@@ -7,7 +7,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/rosterguard}
     username: ${SPRING_DATASOURCE_USERNAME:postgres}
-    password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 20
@@ -28,8 +28,9 @@ roster:
     batch-size: 50
     max-retries: 5
   security:
-    jwt-secret: ${JWT_SECRET:404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970}
+    jwt-secret: ${JWT_SECRET:}
     jwt-expiration-ms: 86400000
+    demo-password: ${ROSTER_DEMO_PASSWORD:}
 
 management:
   endpoints:
@@ -38,7 +39,8 @@ management:
         include: health,info,metrics,prometheus
   endpoint:
     health:
-      show-details: always
+      show-details: when_authorized
+      roles: OPERATOR,ADMIN
   metrics:
     export:
       prometheus:
