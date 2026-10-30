@@ -4,7 +4,8 @@
 # ==============================================================================
 
 param(
-    [string]$BaseUrl = "http://localhost:8080"
+    [string]$BaseUrl = "http://localhost:8080",
+    [switch]$PresentationMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,7 +13,40 @@ $ErrorActionPreference = "Stop"
 Write-Host "=======================================================================" -ForegroundColor Cyan
 Write-Host "                ROSTERGUARD LIVE API DEMONSTRATION                    " -ForegroundColor Cyan
 Write-Host "=======================================================================" -ForegroundColor Cyan
-Write-Host "Target Base URL: $BaseUrl`n"
+Write-Host "Target Base URL: $BaseUrl"
+if ($PresentationMode) {
+    Write-Host "Mode: PRESENTATION MODE (Automated pacing enabled)`n" -ForegroundColor Magenta
+} else {
+    Write-Host "Mode: STANDARD EXECUTION`n"
+}
+
+function Wait-Presentation {
+    param([double]$Seconds = 1.8)
+    if ($PresentationMode) {
+        Start-Sleep -Seconds $Seconds
+    }
+}
+
+# Safe secret loader without hardcoded static string fallbacks
+function Get-LocalSecret {
+    param([string]$Key)
+    $val = [System.Environment]::GetEnvironmentVariable($Key)
+    if (-not [string]::IsNullOrWhiteSpace($val)) {
+        return $val.Trim()
+    }
+    $envFile = Join-Path $PSScriptRoot "..\.env"
+    if (Test-Path $envFile) {
+        foreach ($line in (Get-Content $envFile)) {
+            if ($line -match "^\s*$Key\s*=\s*(.*)$") {
+                $fileVal = $matches[1].Trim()
+                if (-not [string]::IsNullOrWhiteSpace($fileVal)) {
+                    return $fileVal
+                }
+            }
+        }
+    }
+    return $null
+}
 
 # Helper for direct, safe PostgreSQL queries
 function Invoke-PostgresQuery {
@@ -22,23 +56,20 @@ function Invoke-PostgresQuery {
         $found = Get-ChildItem -Path "C:\Program Files\PostgreSQL" -Filter "psql.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($found) { $psql = $found.FullName }
     }
-    $pw = if ($env:SPRING_DATASOURCE_PASSWORD) {
-        $env:SPRING_DATASOURCE_PASSWORD
-    } elseif ($env:POSTGRES_PASSWORD) {
-        $env:POSTGRES_PASSWORD
-    } else {
-        $envFile = Join-Path $PSScriptRoot "..\.env"
-        $val = ""
-        if (Test-Path $envFile) {
-            Get-Content $envFile | ForEach-Object {
-                if ($_ -match '^(?:SPRING_DATASOURCE_PASSWORD|POSTGRES_PASSWORD)=(.*)$') {
-                    $val = $matches[1].Trim()
-                }
-            }
-        }
-        if ($val) { $val } else { "postgres" }
+
+    $pw = Get-LocalSecret "SPRING_DATASOURCE_PASSWORD"
+    if (-not $pw) { $pw = Get-LocalSecret "POSTGRES_PASSWORD" }
+    if (-not $pw) {
+        Write-Host "[-] FATAL ERROR: Database password is not configured in environment or .env." -ForegroundColor Red
+        exit 1
     }
-    $user = if ($env:SPRING_DATASOURCE_USERNAME) { $env:SPRING_DATASOURCE_USERNAME } else { "postgres" }
+
+    $user = Get-LocalSecret "SPRING_DATASOURCE_USERNAME"
+    if (-not $user) { $user = Get-LocalSecret "POSTGRES_USER" }
+    if (-not $user) {
+        Write-Host "[-] FATAL ERROR: Database username is not configured in environment or .env." -ForegroundColor Red
+        exit 1
+    }
     
     $oldEnv = $env:PGPASSWORD
     try {
@@ -117,6 +148,7 @@ try {
         $health = Invoke-RestMethod -Uri "$BaseUrl/actuator/health" -Method Get
         Assert-Step ($health.status -eq "UP") "Application health" "Application is not UP at $BaseUrl"
         Write-Host "    [+] Health Status: $($health.status) (DB: $($health.components.db.status))" -ForegroundColor Green
+        Wait-Presentation 1.2
     } catch {
         Assert-Step $false "Application health" "Failed to connect to health endpoint at $BaseUrl"
     }
@@ -142,7 +174,11 @@ try {
     # 0.2 AUTHENTICATION
     # --------------------------------------------------------------------------
     Write-Host "`n[0.2] Authenticating Roles (No sensitive tokens logged)..." -ForegroundColor Yellow
-    $demoPassword = if ($env:ROSTER_DEMO_PASSWORD) { $env:ROSTER_DEMO_PASSWORD } else { "DemoPassword@2026!" }
+    $demoPassword = Get-LocalSecret "ROSTER_DEMO_PASSWORD"
+    if (-not $demoPassword) {
+        Write-Host "[-] FATAL ERROR: ROSTER_DEMO_PASSWORD is not configured in environment or .env." -ForegroundColor Red
+        exit 1
+    }
 
     # HR_SYNC token (tenant-moveinsync)
     $authHrBody = @{ tenantId = "tenant-moveinsync"; username = "hr_sync"; password = $demoPassword } | ConvertTo-Json
@@ -171,6 +207,7 @@ try {
     $tokenAcmeOp = $authAcmeOp.token
     $headersAcmeOp = @{ "Authorization" = "Bearer $tokenAcmeOp"; "Content-Type" = "application/json" }
     Write-Host "    [+] Authentication OPERATOR (tenant-acme): SUCCESS" -ForegroundColor Green
+    Wait-Presentation 1.5
 
     # --------------------------------------------------------------------------
     # DEMO A: EMPLOYEE CREATION
@@ -198,6 +235,7 @@ try {
     $empA = Invoke-RestMethod -Uri "$BaseUrl/api/v1/employees/EMP-1042" -Method Get -Headers $headersHr
     Assert-Step ($respA.outcome -eq "APPLIED" -and $empA.sourceVersion -eq 5 -and $empA.active -eq $true) "Employee creation" "Creation outcome was not APPLIED or version mismatch"
     Write-Host "    [+] Verified in DB: empId=$($empA.employeeId), version=$($empA.sourceVersion), office=$($empA.officeCode)" -ForegroundColor Green
+    Wait-Presentation 2.0
 
     # --------------------------------------------------------------------------
     # DEMO B: OUT-OF-ORDER EVENT HANDLING
@@ -222,6 +260,7 @@ try {
 
     $respB7 = Invoke-RestMethod -Uri "$BaseUrl/api/v1/hr/events" -Method Post -Headers $headersHr -Body $bodyB7
     Write-Host "    Step 1 (Version 7): $($respB7.outcome)" -ForegroundColor Green
+    Wait-Presentation 1.2
 
     # Step 2: Submit version 6 (office: DEL-01) - Must be STALE no-op
     $bodyB6 = @{
@@ -243,6 +282,7 @@ try {
     $empB = Invoke-RestMethod -Uri "$BaseUrl/api/v1/employees/EMP-1042" -Method Get -Headers $headersHr
     Assert-Step ($respB7.outcome -eq "APPLIED" -and $respB6.outcome -eq "STALE" -and $empB.sourceVersion -eq 7 -and $empB.officeCode -eq "HYD-01") "Out-of-order processing" "Version 6 overwrote version 7 or was not rejected as STALE"
     Write-Host "    [+] Verified DB State: version=$($empB.sourceVersion) (Expected 7), office=$($empB.officeCode) (Expected HYD-01)" -ForegroundColor Green
+    Wait-Presentation 2.0
 
     # --------------------------------------------------------------------------
     # DEMO C: IDEMPOTENCY
@@ -254,6 +294,7 @@ try {
     $respC = Invoke-RestMethod -Uri "$BaseUrl/api/v1/hr/events" -Method Post -Headers $headersHr -Body $bodyB7
     Assert-Step ($respC.outcome -eq "DUPLICATE") "Idempotency" "Replayed version 7 did not return DUPLICATE"
     Write-Host "    [+] Replay Outcome: $($respC.outcome)" -ForegroundColor Green
+    Wait-Presentation 1.8
 
     # --------------------------------------------------------------------------
     # DEMO D: FIELD OWNERSHIP SEPARATION
@@ -270,6 +311,7 @@ try {
 
     $respD1 = Invoke-RestMethod -Uri "$BaseUrl/api/v1/transport/employees/EMP-1042" -Method Put -Headers $headersOp -Body $profileBody
     Write-Host "    Transport profile set: pickup=$($respD1.preferredPickupPoint)" -ForegroundColor Green
+    Wait-Presentation 1.2
 
     # HR sends EmployeeUpdated event version 8
     $bodyD2 = @{
@@ -291,6 +333,7 @@ try {
     $profileD = Invoke-RestMethod -Uri "$BaseUrl/api/v1/transport/employees/EMP-1042" -Method Get -Headers $headersOp
     Assert-Step ($profileD.preferredPickupPoint -eq "Silk Board Gate 2") "Field ownership" "HR update corrupted transport-owned pickup point"
     Write-Host "    [+] Verified Transport Profile: pickup=$($profileD.preferredPickupPoint) (UNTOUCHED)" -ForegroundColor Green
+    Wait-Presentation 2.0
 
     # --------------------------------------------------------------------------
     # DEMO E: RECONCILIATION SAFETY BRAKE (Deterministic 40% Missing)
@@ -321,6 +364,7 @@ try {
     $activeBefore = [int]$activeBeforeStr
     Write-Host "    Existing active employees in tenant-acme: $activeBefore" -ForegroundColor Green
     Assert-Step ($activeBefore -eq 5) "Reconciliation safety brake" "Expected 5 active employees before snapshot, got $activeBefore"
+    Wait-Presentation 1.2
 
     # 2. Generate synthetic CSV with exactly 3 employees (missing 2 = 40% missing)
     $csvFile = [System.IO.Path]::GetTempFileName() + ".csv"
@@ -354,6 +398,7 @@ EMP-ACME-03,Acme Employee 3,emp3@acme.com,+919876543210,MGR-01,BLR-01,1,true
     $activeAfter = [int]$activeAfterStr
     Write-Host "    Active employees in DB while held by safety brake: $activeAfter (Expected 5)" -ForegroundColor Green
     Assert-Step ($activeAfter -eq 5) "Zero automatic deactivations" "Automatic deactivations occurred while run was blocked by safety brake!"
+    Wait-Presentation 2.0
 
     # 5. Operator inspects and approves the blocked run
     Write-Host "    Executing Operator Approval for run $($recResult.runId)..." -ForegroundColor Yellow
@@ -363,6 +408,7 @@ EMP-ACME-03,Acme Employee 3,emp3@acme.com,+919876543210,MGR-01,BLR-01,1,true
     $activeFinalStr = Invoke-PostgresQuery "SELECT COUNT(*) FROM employees WHERE tenant_id = 'tenant-acme' AND active = TRUE;"
     $activeFinal = [int]$activeFinalStr
     Write-Host "    Active employees after approved deactivation: $activeFinal (Expected 3)" -ForegroundColor Green
+    Wait-Presentation 2.0
 
     # --------------------------------------------------------------------------
     # DEMO F & G: OUTBOX RECOVERY, DEACTIVATION & CAB BOOKING CANCELLATION
@@ -380,6 +426,7 @@ VALUES
     ('BOOK-DEMO-FUT', 'tenant-moveinsync', 'EMP-1042', NOW() + INTERVAL '24 hours', 'CONFIRMED', 'SEAT-F2', NOW());
 "@ | Out-Null
     Write-Host "    Seeded bookings for EMP-1042: 1 Past (SEAT-P1, CONFIRMED), 1 Future (SEAT-F2, CONFIRMED)" -ForegroundColor Green
+    Wait-Presentation 1.2
 
     # 2. Ingest DEACTIVATE event for EMP-1042 at version 9
     $bodyG = @{
@@ -397,6 +444,7 @@ VALUES
     $empG = Invoke-RestMethod -Uri "$BaseUrl/api/v1/employees/EMP-1042" -Method Get -Headers $headersHr
     Assert-Step ($respG.outcome -eq "APPLIED" -and $empG.active -eq $false) "Employee creation" "Employee failed to become inactive"
     Write-Host "    [+] Employee active state: $($empG.active)" -ForegroundColor Green
+    Wait-Presentation 1.2
 
     # 4. Outbox Recovery & Polling Verification
     Write-Host "    Polling Outbox event dispatch status (max 5s)..." -ForegroundColor Yellow
@@ -416,6 +464,7 @@ VALUES
     }
     Write-Host "    Outbox event: id=$outboxEventId, status=$outboxStatus" -ForegroundColor Green
     Assert-Step ($outboxStatus -eq "PUBLISHED") "Outbox recovery" "Outbox event was not dispatched and published by worker"
+    Wait-Presentation 1.5
 
     # 5. Check Cab Bookings State in Database
     $futRow = Invoke-PostgresQuery "SELECT booking_status || '|' || COALESCE(seat_id, 'RELEASED') FROM cab_bookings WHERE booking_id = 'BOOK-DEMO-FUT';"
@@ -441,6 +490,7 @@ VALUES
     $consumedCount = [int]$consumedCountStr
     Write-Host "    Consumed events ledger check: record count = $consumedCount" -ForegroundColor Green
     Assert-Step ($consumedCount -ge 1) "Consumer deduplication" "Consumer failed to record event consumption receipt"
+    Wait-Presentation 2.0
 
     # Print Final Status
     Print-Final-Summary
